@@ -40,6 +40,7 @@ import android.provider.MediaStore;
 import android.util.Range;
 import android.util.Size;
 import android.util.Rational;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.ScaleGestureDetector;
 import android.view.Surface;
@@ -70,6 +71,7 @@ import java.util.Date;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
+    private static final String LOG_TAG = "myCamera";
     private static final int CAMERA_PERMISSION = 10;
     private static final int AUDIO_PERMISSION = 11;
     private static final int[] WB_MODES = {
@@ -106,12 +108,18 @@ public class MainActivity extends Activity {
     private CameraDevice camera;
     private CameraCaptureSession session;
     private ImageReader imageReader;
+    private Surface previewSurface;
     private CaptureRequest.Builder previewRequest;
     private CameraCharacteristics characteristics;
     private Size previewSize;
     private Size photoPreviewSize;
     private Size videoPreviewSize;
     private Size videoSize;
+    private Size[] availableJpegSizes;
+    private Size[] availablePreviewSizes;
+    private boolean conservativeCameraSizes;
+    private boolean basicCameraRequest;
+    private int previewFrameCount;
     private String cameraId;
     private boolean frontCamera;
     private boolean flashOn;
@@ -239,7 +247,7 @@ public class MainActivity extends Activity {
             @Override public void onSurfaceTextureAvailable(SurfaceTexture surface, int w, int h) { if (cameraHandler != null) openCamera(); }
             @Override public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int w, int h) { configureTransform(); }
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) { return true; }
-            @Override public void onSurfaceTextureUpdated(SurfaceTexture surface) { }
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture surface) { previewFrameCount++; }
         });
         ScaleGestureDetector pinch = new ScaleGestureDetector(this,
                 new ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -308,7 +316,7 @@ public class MainActivity extends Activity {
             manualFocusProgress = 200;
             updateTopToggleStates();
             closeCamera();
-            openCamera();
+            preview.postDelayed(this::openCamera, 300);
         });
         topToggles.addView(modeToggle, new LinearLayout.LayoutParams(dp(48), dp(48)));
         videoToggle = new ImageView(this);
@@ -669,7 +677,13 @@ public class MainActivity extends Activity {
             if (map == null) { show("This camera does not support JPEG capture"); return; }
             Size[] jpegSizes = map.getOutputSizes(android.graphics.ImageFormat.JPEG);
             Size[] previewSizes = map.getOutputSizes(SurfaceTexture.class);
-            if (jpegSizes == null || previewSizes == null) { show("Camera output sizes unavailable"); return; }
+            if (jpegSizes == null || jpegSizes.length == 0 || previewSizes == null || previewSizes.length == 0) {
+                show("Camera output sizes unavailable"); return;
+            }
+            availableJpegSizes = jpegSizes;
+            availablePreviewSizes = previewSizes;
+            conservativeCameraSizes = false;
+            basicCameraRequest = false;
             Size jpeg = Arrays.stream(jpegSizes).filter(s -> s.getWidth() <= 4000 && s.getHeight() <= 4000)
                     .max(Comparator.comparingLong(s -> (long) s.getWidth() * s.getHeight()))
                     .orElse(Arrays.stream(jpegSizes).min(Comparator.comparingLong(s -> (long) s.getWidth() * s.getHeight())).orElse(jpegSizes[0]));
@@ -689,6 +703,8 @@ public class MainActivity extends Activity {
                             .thenComparingDouble(s -> -((double) s.getWidth() * s.getHeight())))
                     .orElse(photoPreviewSize);
             previewSize = videoMode && videoPreviewSize != null ? videoPreviewSize : photoPreviewSize;
+            Log.i(LOG_TAG, "Opening camera " + cameraId + " (front=" + frontCamera
+                    + "), JPEG " + jpeg + ", preview " + previewSize);
             Range<Integer> range = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
             exposureRange = range == null ? new Range<>(0, 0) : range;
             Rational step = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP);
@@ -718,21 +734,7 @@ public class MainActivity extends Activity {
             for (int choice : wbChoices) if (choice == wbIndex) selectedModeAvailable = true;
             if (!selectedModeAvailable) wbIndex = wbChoices[0];
             showProperty(selectedCategory, selectedProperty);
-            if (imageReader != null) imageReader.close();
-            imageReader = ImageReader.newInstance(jpeg.getWidth(), jpeg.getHeight(), android.graphics.ImageFormat.JPEG, 2);
-            imageReader.setOnImageAvailableListener(reader -> {
-                Image image = reader.acquireNextImage();
-                if (image == null) return;
-                byte[] bytes;
-                try {
-                    ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                    bytes = new byte[buffer.remaining()]; buffer.get(bytes);
-                } finally { image.close(); }
-                Settings settings = pendingCapture;
-                try { saveImage(bytes, settings == null ? new Settings(0, 0, 0, 0, 0, 0f) : settings); }
-                catch (Exception e) { show("Could not save photo: " + e.getMessage()); }
-                finally { runOnUiThread(() -> { capturing = false; captureButton.setEnabled(true); }); }
-            }, cameraHandler);
+            createImageReader(jpeg);
             configureTransform();
             final int generation = cameraGeneration;
             opening = true;
@@ -753,12 +755,31 @@ public class MainActivity extends Activity {
                     device.close();
                     if (generation == cameraGeneration) {
                         opening = false; camera = null;
+                        Log.e(LOG_TAG, "Camera " + cameraId + " error " + error);
                         if (recording || recordingStarting) runOnUiThread(() -> abortRecording());
                         show("Camera error: " + error);
                     }
                 }
             }, cameraHandler);
-        } catch (Exception e) { opening = false; show("Could not open camera: " + e.getMessage()); }
+        } catch (Exception e) { opening = false; Log.e(LOG_TAG, "Could not open camera", e); show("Could not open camera: " + e.getMessage()); }
+    }
+
+    private void createImageReader(Size jpeg) {
+        if (imageReader != null) imageReader.close();
+        imageReader = ImageReader.newInstance(jpeg.getWidth(), jpeg.getHeight(), android.graphics.ImageFormat.JPEG, 2);
+        imageReader.setOnImageAvailableListener(reader -> {
+                Image image = reader.acquireNextImage();
+                if (image == null) return;
+                byte[] bytes;
+                try {
+                    ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                    bytes = new byte[buffer.remaining()]; buffer.get(bytes);
+                } finally { image.close(); }
+                Settings settings = pendingCapture;
+                try { saveImage(bytes, settings == null ? new Settings(0, 0, 0, 0, 0, 0f) : settings); }
+                catch (Exception e) { show("Could not save photo: " + e.getMessage()); }
+                finally { runOnUiThread(() -> { capturing = false; captureButton.setEnabled(true); }); }
+        }, cameraHandler);
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
@@ -779,6 +800,7 @@ public class MainActivity extends Activity {
             SurfaceTexture texture = preview.getSurfaceTexture();
             texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
             Surface surface = new Surface(texture);
+            previewSurface = surface;
             previewRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             previewRequest.addTarget(surface);
             camera.createCaptureSession(Arrays.asList(surface, imageReader.getSurface()), new CameraCaptureSession.StateCallback() {
@@ -786,12 +808,78 @@ public class MainActivity extends Activity {
                     if (camera == null || generation != sessionGeneration) { newSession.close(); return; }
                     session = newSession;
                     updatePreviewRequest();
+                    runOnUiThread(() -> {
+                        if (generation != sessionGeneration) return;
+                        previewFrameCount = 0;
+                        preview.postDelayed(() -> checkPreviewFrames(generation), 2500);
+                    });
                 }
                 @Override public void onConfigureFailed(CameraCaptureSession failedSession) {
-                    if (generation == sessionGeneration) show("Could not start preview");
+                    failedSession.close();
+                    if (generation == sessionGeneration) retryConservativePreview("Camera rejected preview stream sizes");
                 }
             }, cameraHandler);
-        } catch (CameraAccessException e) { show("Preview error: " + e.getMessage()); }
+        } catch (Exception e) {
+            Log.e(LOG_TAG, "Could not configure preview", e);
+            retryConservativePreview("Could not configure preview: " + e.getMessage());
+        }
+    }
+
+    private void retryConservativePreview(String reason) {
+        Log.w(LOG_TAG, reason);
+        if (!resumed || camera == null) return;
+        if (conservativeCameraSizes || availableJpegSizes == null || availablePreviewSizes == null) {
+            show("Camera preview is still unavailable on this device");
+            return;
+        }
+        conservativeCameraSizes = true;
+        try {
+            Size jpeg = Arrays.stream(availableJpegSizes)
+                    .filter(s -> (long) s.getWidth() * s.getHeight() <= 2_100_000L)
+                    .min(Comparator.comparingDouble((Size s) -> Math.abs((double) s.getWidth() / s.getHeight() - 4d / 3d))
+                            .thenComparingLong(s -> -((long) s.getWidth() * s.getHeight())))
+                    .orElse(Arrays.stream(availableJpegSizes)
+                            .min(Comparator.comparingLong(s -> (long) s.getWidth() * s.getHeight())).orElse(availableJpegSizes[0]));
+            Size smallPreview = Arrays.stream(availablePreviewSizes)
+                    .filter(s -> s.getWidth() <= 1280 && s.getHeight() <= 960)
+                    .min(Comparator.comparingDouble((Size s) -> Math.abs((double) s.getWidth() / s.getHeight()
+                            - (double) jpeg.getWidth() / jpeg.getHeight()))
+                            .thenComparingLong(s -> Math.abs((long) s.getWidth() * s.getHeight() - 640L * 480L)))
+                    .orElse(Arrays.stream(availablePreviewSizes)
+                            .min(Comparator.comparingLong(s -> (long) s.getWidth() * s.getHeight())).orElse(availablePreviewSizes[0]));
+            Log.w(LOG_TAG, "Retrying camera " + cameraId + " with JPEG " + jpeg + " and preview " + smallPreview);
+            if (session != null) { session.close(); session = null; }
+            previewRequest = null;
+            createImageReader(jpeg);
+            photoPreviewSize = smallPreview;
+            videoPreviewSize = smallPreview;
+            previewSize = smallPreview;
+            runOnUiThread(this::configureTransform);
+            startPreview();
+        } catch (Exception e) {
+            Log.e(LOG_TAG, "Conservative camera configuration failed", e);
+            show("This camera could not start: " + e.getMessage());
+        }
+    }
+
+    private void checkPreviewFrames(int generation) {
+        if (!resumed || camera == null || generation != sessionGeneration || recording || recordingStarting) return;
+        boolean black = previewFrameCount == 0;
+        if (!black && preview.isAvailable()) {
+            Bitmap frame = preview.getBitmap(24, 24);
+            if (frame != null) {
+                black = true;
+                for (int y = 0; y < frame.getHeight() && black; y += 3)
+                    for (int x = 0; x < frame.getWidth(); x += 3) {
+                        int pixel = frame.getPixel(x, y);
+                        if (Color.red(pixel) > 5 || Color.green(pixel) > 5 || Color.blue(pixel) > 5) {
+                            black = false; break;
+                        }
+                    }
+                frame.recycle();
+            }
+        }
+        if (black) retryConservativePreview("Preview stayed black after " + previewFrameCount + " frames");
     }
 
     private boolean supportsWhiteBalance(int mode) {
@@ -802,41 +890,72 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    private boolean supportsRequestKey(CaptureRequest.Key<?> key) {
+        return characteristics != null && characteristics.getAvailableCaptureRequestKeys().contains(key);
+    }
+
     private void applyCameraSettings(CaptureRequest.Builder builder) {
-        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
         int[] focusModes = characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
         boolean continuous = false;
+        boolean autoFocus = false;
+        boolean focusOff = false;
         if (focusModes != null) for (int mode : focusModes) if (mode == CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE) continuous = true;
+        if (focusModes != null) for (int mode : focusModes) {
+            if (mode == CaptureRequest.CONTROL_AF_MODE_AUTO) autoFocus = true;
+            if (mode == CaptureRequest.CONTROL_AF_MODE_OFF) focusOff = true;
+        }
         if (manualFocusSupported && manualFocusProgress != 200) {
             builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
             builder.set(CaptureRequest.LENS_FOCUS_DISTANCE,
                     maxFocusDistance * manualFocusProgress / 400f);
-        } else {
+        } else if (supportsRequestKey(CaptureRequest.CONTROL_AF_MODE) && (continuous || autoFocus || focusOff)) {
             builder.set(CaptureRequest.CONTROL_AF_MODE,
-                    continuous ? CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE : CaptureRequest.CONTROL_AF_MODE_OFF);
+                    continuous ? CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                            : autoFocus ? CaptureRequest.CONTROL_AF_MODE_AUTO : CaptureRequest.CONTROL_AF_MODE_OFF);
         }
-        builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
-        builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, exposureSteps);
-        builder.set(CaptureRequest.CONTROL_AWB_MODE, supportsWhiteBalance(WB_MODES[wbIndex]) ? WB_MODES[wbIndex] : CaptureRequest.CONTROL_AWB_MODE_AUTO);
-        builder.set(CaptureRequest.FLASH_MODE, flashOn ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
+        int[] aeModes = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES);
+        if (supportsRequestKey(CaptureRequest.CONTROL_AE_MODE) && aeModes != null)
+            for (int mode : aeModes) if (mode == CaptureRequest.CONTROL_AE_MODE_ON) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                break;
+            }
+        if (supportsRequestKey(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION))
+            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, exposureSteps);
+        if (supportsRequestKey(CaptureRequest.CONTROL_AWB_MODE))
+            builder.set(CaptureRequest.CONTROL_AWB_MODE,
+                    supportsWhiteBalance(WB_MODES[wbIndex]) ? WB_MODES[wbIndex] : CaptureRequest.CONTROL_AWB_MODE_AUTO);
+        if (flashAvailable && supportsRequestKey(CaptureRequest.FLASH_MODE))
+            builder.set(CaptureRequest.FLASH_MODE, flashOn ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
         Rect sensor = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
-        if (sensor != null && zoomFactor > 1f) {
+        if (sensor != null && zoomFactor > 1f && supportsRequestKey(CaptureRequest.SCALER_CROP_REGION)) {
             int width = Math.round(sensor.width() / zoomFactor);
             int height = Math.round(sensor.height() / zoomFactor);
             int left = sensor.left + (sensor.width() - width) / 2;
             int top = sensor.top + (sensor.height() - height) / 2;
             builder.set(CaptureRequest.SCALER_CROP_REGION, new Rect(left, top, left + width, top + height));
-        } else if (sensor != null) {
-            builder.set(CaptureRequest.SCALER_CROP_REGION, sensor);
         }
     }
 
     private void updatePreviewRequest() {
         if (previewRequest == null || session == null || cameraHandler == null) return;
         try {
-            applyCameraSettings(previewRequest);
+            if (!basicCameraRequest) applyCameraSettings(previewRequest);
             session.setRepeatingRequest(previewRequest.build(), null, cameraHandler);
-        } catch (Exception e) { show("Setting unavailable on this camera"); }
+        } catch (Exception e) {
+            Log.e(LOG_TAG, "Preview request rejected", e);
+            if (!basicCameraRequest) {
+                try {
+                    CaptureRequest.Builder safe = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                    safe.addTarget(previewSurface);
+                    session.setRepeatingRequest(safe.build(), null, cameraHandler);
+                    previewRequest = safe;
+                    basicCameraRequest = true;
+                    show("Some camera controls are unavailable on this device");
+                    return;
+                } catch (Exception fallbackError) { Log.e(LOG_TAG, "Basic preview request rejected", fallbackError); }
+            }
+            retryConservativePreview("Preview request failed: " + e.getMessage());
+        }
     }
 
     private void startRecordingWithPermission() {
@@ -902,7 +1021,7 @@ public class MainActivity extends Activity {
                             try {
                                 session = newSession;
                                 previewRequest = request;
-                                applyCameraSettings(request);
+                                if (!basicCameraRequest) applyCameraSettings(request);
                                 newSession.setRepeatingRequest(request.build(), null, cameraHandler);
                                 recorder.start();
                                 recording = true;
@@ -997,7 +1116,7 @@ public class MainActivity extends Activity {
         try {
             CaptureRequest.Builder still = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             still.addTarget(imageReader.getSurface());
-            applyCameraSettings(still);
+            if (!basicCameraRequest) applyCameraSettings(still);
             Integer sensor = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
             still.set(CaptureRequest.JPEG_ORIENTATION, sensor == null ? 0 : sensor);
             session.capture(still.build(), new CameraCaptureSession.CaptureCallback() {
