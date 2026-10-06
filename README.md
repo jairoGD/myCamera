@@ -4,9 +4,9 @@ A personal Android camera app built with Java and Camera2. QR code detection use
 
 ## Download
 
-**[Download my Camera APK](https://github.com/jairoGD/myCamera/releases/download/v1.0.0-debug/myCamera-v1.0.0-debug.apk)** · [Release notes](https://github.com/jairoGD/myCamera/releases/tag/v1.0.0-debug)
+**[Download my Camera APK (1.0.1)](https://github.com/jairoGD/myCamera/releases/download/v1.0.1-debug/myCamera-v1.0.1-debug.apk)** · [Release notes](https://github.com/jairoGD/myCamera/releases/tag/v1.0.1-debug)
 
-This is a debug-signed build for personal testing. Download the APK on your Android device and open it to install. The SHA-256 checksum is `4994F406255E544E4733303BE43FB41D1AF451D850BDB826C669E5D32599296B`.
+This is a debug-signed build for personal testing. Download the APK on your Android device and open it to install. Version 1.0.1 retries smaller camera streams when a device shows a black preview; this still needs testing on the affected Xiaomi. The SHA-256 checksum is `A6108AC80BEF9FA139E4491D21BF4698FC48903D35C4B232F5F653C93F1950E9`.
 
 ## Run it
 
