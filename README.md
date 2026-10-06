@@ -2,6 +2,12 @@
 
 A personal Android camera app built with Java and Camera2. QR code detection uses Google ML Kit. Requires Android 10 (API 29) or newer.
 
+## Download
+
+**[Download my Camera APK](https://github.com/jairoGD/myCamera/releases/download/v1.0.0-debug/myCamera-v1.0.0-debug.apk)** · [Release notes](https://github.com/jairoGD/myCamera/releases/tag/v1.0.0-debug)
+
+This is a debug-signed build for personal testing. Download the APK on your Android device and open it to install. The SHA-256 checksum is `4994F406255E544E4733303BE43FB41D1AF451D850BDB826C669E5D32599296B`.
+
 ## Run it
 
 Open this folder in Android Studio, let Gradle sync, and run the `app` configuration on a phone. Grant camera permission. Photos appear in the gallery under `Pictures/my Camera`; videos appear under `Movies/my Camera`. Microphone permission is requested when you first start recording. If declined, video still records without audio.
